@@ -89,8 +89,7 @@
     else if (typeof document === 'undefined' && typeof self !== 'undefined') {
         env.worker = true;
     }
-    else if (typeof navigator === 'undefined'
-        || navigator.userAgent.indexOf('Node.js') === 0) {
+    else if (!env.hasGlobalWindow || 'Deno' in window) {
         env.node = true;
         env.svgSupported = true;
     }
@@ -8924,15 +8923,27 @@
 
     var STYLE_REG = /\{([a-zA-Z0-9_]+)\|([^}]*)\}/g;
     function truncateText(text, containerWidth, font, ellipsis, options) {
+        var out = {};
+        truncateText2(out, text, containerWidth, font, ellipsis, options);
+        return out.text;
+    }
+    function truncateText2(out, text, containerWidth, font, ellipsis, options) {
         if (!containerWidth) {
-            return '';
+            out.text = '';
+            out.isTruncated = false;
+            return;
         }
         var textLines = (text + '').split('\n');
         options = prepareTruncateOptions(containerWidth, font, ellipsis, options);
+        var isTruncated = false;
+        var truncateOut = {};
         for (var i = 0, len = textLines.length; i < len; i++) {
-            textLines[i] = truncateSingleLine(textLines[i], options);
+            truncateSingleLine(truncateOut, textLines[i], options);
+            textLines[i] = truncateOut.textLine;
+            isTruncated = isTruncated || truncateOut.isTruncated;
         }
-        return textLines.join('\n');
+        out.text = textLines.join('\n');
+        out.isTruncated = isTruncated;
     }
     function prepareTruncateOptions(containerWidth, font, ellipsis, options) {
         options = options || {};
@@ -8960,16 +8971,20 @@
         preparedOpts.containerWidth = containerWidth;
         return preparedOpts;
     }
-    function truncateSingleLine(textLine, options) {
+    function truncateSingleLine(out, textLine, options) {
         var containerWidth = options.containerWidth;
         var font = options.font;
         var contentWidth = options.contentWidth;
         if (!containerWidth) {
-            return '';
+            out.textLine = '';
+            out.isTruncated = false;
+            return;
         }
         var lineWidth = getWidth(textLine, font);
         if (lineWidth <= containerWidth) {
-            return textLine;
+            out.textLine = textLine;
+            out.isTruncated = false;
+            return;
         }
         for (var j = 0;; j++) {
             if (lineWidth <= contentWidth || j >= options.maxIterations) {
@@ -8987,7 +9002,8 @@
         if (textLine === '') {
             textLine = options.placeholder;
         }
-        return textLine;
+        out.textLine = textLine;
+        out.isTruncated = true;
     }
     function estimateLength(text, contentWidth, ascCharWidth, cnCharWidth) {
         var width = 0;
@@ -9008,6 +9024,7 @@
         var lineHeight = retrieve2(style.lineHeight, calculatedLineHeight);
         var bgColorDrawn = !!(style.backgroundColor);
         var truncateLineOverflow = style.lineOverflow === 'truncate';
+        var isTruncated = false;
         var width = style.width;
         var lines;
         if (width != null && (overflow === 'break' || overflow === 'breakAll')) {
@@ -9020,6 +9037,7 @@
         var height = retrieve2(style.height, contentHeight);
         if (contentHeight > height && truncateLineOverflow) {
             var lineCount = Math.floor(height / lineHeight);
+            isTruncated = isTruncated || (lines.length > lineCount);
             lines = lines.slice(0, lineCount);
         }
         if (text && truncate && width != null) {
@@ -9027,8 +9045,11 @@
                 minChar: style.truncateMinChar,
                 placeholder: style.placeholder
             });
+            var singleOut = {};
             for (var i = 0; i < lines.length; i++) {
-                lines[i] = truncateSingleLine(lines[i], options);
+                truncateSingleLine(singleOut, lines[i], options);
+                lines[i] = singleOut.textLine;
+                isTruncated = isTruncated || singleOut.isTruncated;
             }
         }
         var outerHeight = height;
@@ -9057,7 +9078,8 @@
             calculatedLineHeight: calculatedLineHeight,
             contentWidth: contentWidth,
             contentHeight: contentHeight,
-            width: width
+            width: width,
+            isTruncated: isTruncated
         };
     }
     var RichTextToken = (function () {
@@ -9083,6 +9105,7 @@
             this.outerWidth = 0;
             this.outerHeight = 0;
             this.lines = [];
+            this.isTruncated = false;
         }
         return RichTextContentBlock;
     }());
@@ -9117,6 +9140,7 @@
         var stlPadding = style.padding;
         var truncate = overflow === 'truncate';
         var truncateLine = style.lineOverflow === 'truncate';
+        var tmpTruncateOut = {};
         function finishLine(line, lineWidth, lineHeight) {
             line.width = lineWidth;
             line.lineHeight = lineHeight;
@@ -9142,6 +9166,7 @@
                 token.align = tokenStyle && tokenStyle.align || style.align;
                 token.verticalAlign = tokenStyle && tokenStyle.verticalAlign || 'middle';
                 if (truncateLine && topHeight != null && calculatedHeight + token.lineHeight > topHeight) {
+                    var originalLength = contentBlock.lines.length;
                     if (j > 0) {
                         line.tokens = line.tokens.slice(0, j);
                         finishLine(line, lineWidth, lineHeight);
@@ -9150,6 +9175,7 @@
                     else {
                         contentBlock.lines = contentBlock.lines.slice(0, i);
                     }
+                    contentBlock.isTruncated = contentBlock.isTruncated || (contentBlock.lines.length < originalLength);
                     break outer;
                 }
                 var styleTokenWidth = tokenStyle.width;
@@ -9178,7 +9204,9 @@
                             token.width = token.contentWidth = 0;
                         }
                         else {
-                            token.text = truncateText(token.text, remainTruncWidth - paddingH, font, style.ellipsis, { minChar: style.truncateMinChar });
+                            truncateText2(tmpTruncateOut, token.text, remainTruncWidth - paddingH, font, style.ellipsis, { minChar: style.truncateMinChar });
+                            token.text = tmpTruncateOut.text;
+                            contentBlock.isTruncated = contentBlock.isTruncated || tmpTruncateOut.isTruncated;
                             token.width = token.contentWidth = getWidth(token.text, font);
                         }
                     }
@@ -10036,7 +10064,7 @@
             for (var i = 0; i < len; i++) {
                 appendSize += path[i].len();
             }
-            if (hasTypedArray && (this.data instanceof Float32Array)) {
+            if (hasTypedArray && (this.data instanceof Float32Array || !this.data)) {
                 this.data = new Float32Array(offset + appendSize);
             }
             for (var i = 0; i < len; i++) {
@@ -11804,6 +11832,7 @@
             var textLines = contentBlock.lines;
             var lineHeight = contentBlock.lineHeight;
             var defaultStyle = this._defaultStyle;
+            this.isTruncated = !!contentBlock.isTruncated;
             var baseX = style.x || 0;
             var baseY = style.y || 0;
             var textAlign = style.align || defaultStyle.align || 'left';
@@ -11870,7 +11899,7 @@
                 setSeparateFont(subElStyle, style);
                 textY += lineHeight;
                 if (fixedBoundingRect) {
-                    el.setBoundingRect(new BoundingRect(adjustTextX(subElStyle.x, style.width, subElStyle.textAlign), adjustTextY$1(subElStyle.y, calculatedLineHeight, subElStyle.textBaseline), contentWidth, calculatedLineHeight));
+                    el.setBoundingRect(new BoundingRect(adjustTextX(subElStyle.x, contentWidth, subElStyle.textAlign), adjustTextY$1(subElStyle.y, calculatedLineHeight, subElStyle.textBaseline), contentWidth, calculatedLineHeight));
                 }
             }
         };
@@ -11887,6 +11916,7 @@
             var defaultStyle = this._defaultStyle;
             var textAlign = style.align || defaultStyle.align;
             var verticalAlign = style.verticalAlign || defaultStyle.verticalAlign;
+            this.isTruncated = !!contentBlock.isTruncated;
             var boxX = adjustTextX(baseX, outerWidth, textAlign);
             var boxY = adjustTextY$1(baseY, outerHeight, verticalAlign);
             var xLeft = boxX;
@@ -13175,7 +13205,7 @@
         var innerOpts = extend({}, opts);
         innerOpts.buildPath = function (path) {
             if (isPathProxy(path)) {
-                path.setData(pathProxy.data);
+                path.appendPath(pathProxy);
                 var ctx = path.getContext();
                 if (ctx) {
                     path.rebuildPath(ctx, 1);
@@ -21364,6 +21394,59 @@
         return target;
       };
       /**
+       * Large data down sampling using min-max
+       * @param {string} valueDimension
+       * @param {number} rate
+       */
+      DataStore.prototype.minmaxDownSample = function (valueDimension, rate) {
+        var target = this.clone([valueDimension], true);
+        var targetStorage = target._chunks;
+        var frameSize = Math.floor(1 / rate);
+        var dimStore = targetStorage[valueDimension];
+        var len = this.count();
+        // Each frame results in 2 data points, one for min and one for max
+        var newIndices = new (getIndicesCtor(this._rawCount))(Math.ceil(len / frameSize) * 2);
+        var offset = 0;
+        for (var i = 0; i < len; i += frameSize) {
+          var minIndex = i;
+          var minValue = dimStore[this.getRawIndex(minIndex)];
+          var maxIndex = i;
+          var maxValue = dimStore[this.getRawIndex(maxIndex)];
+          var thisFrameSize = frameSize;
+          // Handle final smaller frame
+          if (i + frameSize > len) {
+            thisFrameSize = len - i;
+          }
+          // Determine min and max within the current frame
+          for (var k = 0; k < thisFrameSize; k++) {
+            var rawIndex = this.getRawIndex(i + k);
+            var value = dimStore[rawIndex];
+            if (value < minValue) {
+              minValue = value;
+              minIndex = i + k;
+            }
+            if (value > maxValue) {
+              maxValue = value;
+              maxIndex = i + k;
+            }
+          }
+          var rawMinIndex = this.getRawIndex(minIndex);
+          var rawMaxIndex = this.getRawIndex(maxIndex);
+          // Set the order of the min and max values, based on their ordering in the frame
+          if (minIndex < maxIndex) {
+            newIndices[offset++] = rawMinIndex;
+            newIndices[offset++] = rawMaxIndex;
+          } else {
+            newIndices[offset++] = rawMaxIndex;
+            newIndices[offset++] = rawMinIndex;
+          }
+        }
+        target._count = offset;
+        target._indices = newIndices;
+        target._updateGetRawIdx();
+        return target;
+      };
+      /**
        * Large data down sampling on given dimension
        * @param sampleIndex Sample index for name and id
        */
@@ -21956,6 +22039,14 @@
     }
 
     var TOOLTIP_LINE_HEIGHT_CSS = 'line-height:1';
+    function getTooltipLineHeight(textStyle) {
+      var lineHeight = textStyle.lineHeight;
+      if (lineHeight == null) {
+        return TOOLTIP_LINE_HEIGHT_CSS;
+      } else {
+        return "line-height:" + encodeHTML(lineHeight + '') + "px";
+      }
+    }
     // TODO: more textStyle option
     function getTooltipTextStyle(textStyle, renderMode) {
       var nameFontColor = textStyle.color || '#6e7079';
@@ -22058,16 +22149,17 @@
         }) : ctx, subBlock, idx > 0 ? gaps.html : 0, toolTipTextStyle);
         subMarkupText != null && subMarkupTextList.push(subMarkupText);
       });
-      var subMarkupText = ctx.renderMode === 'richText' ? subMarkupTextList.join(gaps.richText) : wrapBlockHTML(subMarkupTextList.join(''), noHeader ? topMarginForOuterGap : gaps.html);
+      var subMarkupText = ctx.renderMode === 'richText' ? subMarkupTextList.join(gaps.richText) : wrapBlockHTML(toolTipTextStyle, subMarkupTextList.join(''), noHeader ? topMarginForOuterGap : gaps.html);
       if (noHeader) {
         return subMarkupText;
       }
       var displayableHeader = makeValueReadable(fragment.header, 'ordinal', ctx.useUTC);
       var nameStyle = getTooltipTextStyle(toolTipTextStyle, ctx.renderMode).nameStyle;
+      var tooltipLineHeight = getTooltipLineHeight(toolTipTextStyle);
       if (ctx.renderMode === 'richText') {
         return wrapInlineNameRichText(ctx, displayableHeader, nameStyle) + gaps.richText + subMarkupText;
       } else {
-        return wrapBlockHTML("<div style=\"" + nameStyle + ";" + TOOLTIP_LINE_HEIGHT_CSS + ";\">" + encodeHTML(displayableHeader) + '</div>' + subMarkupText, topMarginForOuterGap);
+        return wrapBlockHTML(toolTipTextStyle, "<div style=\"" + nameStyle + ";" + tooltipLineHeight + ";\">" + encodeHTML(displayableHeader) + '</div>' + subMarkupText, topMarginForOuterGap);
       }
     }
     function buildNameValue(ctx, fragment, topMarginForOuterGap, toolTipTextStyle) {
@@ -22098,7 +22190,7 @@
         valueStyle = _a.valueStyle;
       return renderMode === 'richText' ? (noMarker ? '' : markerStr) + (noName ? '' : wrapInlineNameRichText(ctx, readableName, nameStyle))
       // Value has commas inside, so use ' ' as delimiter for multiple values.
-      + (noValue ? '' : wrapInlineValueRichText(ctx, readableValueList, valueAlignRight, valueCloseToMarker, valueStyle)) : wrapBlockHTML((noMarker ? '' : markerStr) + (noName ? '' : wrapInlineNameHTML(readableName, !noMarker, nameStyle)) + (noValue ? '' : wrapInlineValueHTML(readableValueList, valueAlignRight, valueCloseToMarker, valueStyle)), topMarginForOuterGap);
+      + (noValue ? '' : wrapInlineValueRichText(ctx, readableValueList, valueAlignRight, valueCloseToMarker, valueStyle)) : wrapBlockHTML(toolTipTextStyle, (noMarker ? '' : markerStr) + (noName ? '' : wrapInlineNameHTML(readableName, !noMarker, nameStyle)) + (noValue ? '' : wrapInlineValueHTML(readableValueList, valueAlignRight, valueCloseToMarker, valueStyle)), topMarginForOuterGap);
     }
     /**
      * @return markupText. null/undefined means no content.
@@ -22123,10 +22215,11 @@
         richText: RICH_TEXT_GAPS[gapLevel]
       };
     }
-    function wrapBlockHTML(encodedContent, topGap) {
+    function wrapBlockHTML(textStyle, encodedContent, topGap) {
       var clearfix = '<div style="clear:both"></div>';
       var marginCSS = "margin: " + topGap + "px 0 0";
-      return "<div style=\"" + marginCSS + ";" + TOOLTIP_LINE_HEIGHT_CSS + ";\">" + encodedContent + clearfix + '</div>';
+      var tooltipLineHeight = getTooltipLineHeight(textStyle);
+      return "<div style=\"" + marginCSS + ";" + tooltipLineHeight + ";\">" + encodedContent + clearfix + '</div>';
     }
     function wrapInlineNameHTML(name, leftHasMarker, style) {
       var marginCss = leftHasMarker ? 'margin-left:2px' : '';
@@ -24050,6 +24143,9 @@
       },
       legend: {
         textStyle: {
+          color: contrastColor
+        },
+        pageTextStyle: {
           color: contrastColor
         }
       },
@@ -28837,10 +28933,10 @@
         this.hasItemOption = false;
         // Methods that create a new list based on this list should be listed here.
         // Notice that those method should `RETURN` the new list.
-        this.TRANSFERABLE_METHODS = ['cloneShallow', 'downSample', 'lttbDownSample', 'map'];
+        this.TRANSFERABLE_METHODS = ['cloneShallow', 'downSample', 'minmaxDownSample', 'lttbDownSample', 'map'];
         // Methods that change indices of this list should be listed here.
         this.CHANGABLE_METHODS = ['filterSelf', 'selectRange'];
-        this.DOWNSAMPLE_METHODS = ['downSample', 'lttbDownSample'];
+        this.DOWNSAMPLE_METHODS = ['downSample', 'minmaxDownSample', 'lttbDownSample'];
         var dimensions;
         var assignStoreDimIdx = false;
         if (isSeriesDataSchema(dimensionsInput)) {
@@ -29322,7 +29418,7 @@
             throw new Error('Do not supported yet');
           }
         }
-        var rawIndex = invertedIndices[value];
+        var rawIndex = invertedIndices && invertedIndices[value];
         if (rawIndex == null || isNaN(rawIndex)) {
           return INDEX_NOT_FOUND;
         }
@@ -29431,6 +29527,16 @@
       SeriesData.prototype.downSample = function (dimension, rate, sampleValue, sampleIndex) {
         var list = cloneListForMapAndSample(this);
         list._store = this._store.downSample(this._getStoreDimIndex(dimension), rate, sampleValue, sampleIndex);
+        return list;
+      };
+      /**
+       * Large data down sampling using min-max
+       * @param {string} valueDimension
+       * @param {number} rate
+       */
+      SeriesData.prototype.minmaxDownSample = function (valueDimension, rate) {
+        var list = cloneListForMapAndSample(this);
+        list._store = this._store.minmaxDownSample(this._getStoreDimIndex(valueDimension), rate);
         return list;
       };
       /**
@@ -32191,7 +32297,7 @@
     barWidthAndOffset) {
       // Get Axis Length
       var axisExtent = model.axis.getExtent();
-      var axisLength = axisExtent[1] - axisExtent[0];
+      var axisLength = Math.abs(axisExtent[1] - axisExtent[0]);
       // Get bars on current base axis and calculate min and max overflow
       var barsOnCurrentAxis = retrieveColumnLayout(barWidthAndOffset, model.axis);
       if (barsOnCurrentAxis === undefined) {
@@ -33030,8 +33136,13 @@
       var custom = axis.getLabelModel().get('customValues');
       if (custom) {
         var labelFormatter_1 = makeLabelFormatter(axis);
+        var extent_1 = axis.scale.getExtent();
+        var tickNumbers = tickValuesToNumbers(axis, custom);
+        var ticks = filter(tickNumbers, function (val) {
+          return val >= extent_1[0] && val <= extent_1[1];
+        });
         return {
-          labels: tickValuesToNumbers(axis, custom).map(function (numval) {
+          labels: map(ticks, function (numval) {
             var tick = {
               value: numval
             };
@@ -33057,8 +33168,12 @@
     function createAxisTicks(axis, tickModel) {
       var custom = axis.getTickModel().get('customValues');
       if (custom) {
+        var extent_2 = axis.scale.getExtent();
+        var tickNumbers = tickValuesToNumbers(axis, custom);
         return {
-          ticks: tickValuesToNumbers(axis, custom)
+          ticks: filter(tickNumbers, function (val) {
+            return val >= extent_2[0] && val <= extent_2[1];
+          })
         };
       }
       // Only ordinal scale support tick interval
@@ -33515,7 +33630,8 @@
       if (ticksLen === 1) {
         ticksCoords[0].coord = axisExtent[0];
         last = ticksCoords[1] = {
-          coord: axisExtent[1]
+          coord: axisExtent[1],
+          tickValue: ticksCoords[0].tickValue
         };
       } else {
         var crossLen = ticksCoords[ticksLen - 1].tickValue - ticksCoords[0].tickValue;
@@ -33526,7 +33642,8 @@
         var dataExtent = axis.scale.getExtent();
         diffSize = 1 + dataExtent[1] - ticksCoords[ticksLen - 1].tickValue;
         last = {
-          coord: ticksCoords[ticksLen - 1].coord + shift_1 * diffSize
+          coord: ticksCoords[ticksLen - 1].coord + shift_1 * diffSize,
+          tickValue: dataExtent[1] + 1
         };
         ticksCoords.push(last);
       }
@@ -34704,11 +34821,11 @@
             else if (isFillStroke && isPattern(val)) {
                 setPattern(el, attrs, key, scope);
             }
-            else if (isFillStroke && val === 'none') {
-                attrs[key] = 'transparent';
-            }
             else {
                 attrs[key] = val;
+            }
+            if (isFillStroke && scope.ssr && val === 'none') {
+                attrs['pointer-events'] = 'visible';
             }
         }, style, el, false);
         setShadow(el, attrs, scope);
@@ -35488,6 +35605,7 @@
             scope.willUpdate = opts.willUpdate;
             scope.compress = opts.compress;
             scope.emphasis = opts.emphasis;
+            scope.ssr = this._opts.ssr;
             var children = [];
             var bgVNode = this._bgVNode = createBackgroundVNode(width, height, this._backgroundColor, scope);
             bgVNode && children.push(bgVNode);
@@ -37689,7 +37807,7 @@
       var y = rect.y;
       var width = rect.width;
       var height = rect.height;
-      var lineWidth = seriesModel.get(['lineStyle', 'width']) || 2;
+      var lineWidth = seriesModel.get(['lineStyle', 'width']) || 0;
       // Expand the clip path a bit to avoid the border is clipped and looks thinner
       x -= lineWidth / 2;
       y -= lineWidth / 2;
@@ -37884,7 +38002,17 @@
       }
       return points;
     }
-    function turnPointsIntoStep(points, coordSys, stepTurnAt, connectNulls) {
+    /**
+     * Filter the null data and extend data for step considering `stepTurnAt`
+     *
+     * @param points data to convert, that may containing null
+     * @param basePoints base data to reference, used only for areaStyle points
+     * @param coordSys coordinate system
+     * @param stepTurnAt 'start' | 'end' | 'middle' | true
+     * @param connectNulls whether to connect nulls
+     * @returns converted point positions
+     */
+    function turnPointsIntoStep(points, basePoints, coordSys, stepTurnAt, connectNulls) {
       var baseAxis = coordSys.getBaseAxis();
       var baseIndex = baseAxis.dim === 'x' || baseAxis.dim === 'radius' ? 0 : 1;
       var stepPoints = [];
@@ -37895,7 +38023,13 @@
       var filteredPoints = [];
       if (connectNulls) {
         for (i = 0; i < points.length; i += 2) {
-          if (!isNaN(points[i]) && !isNaN(points[i + 1])) {
+          /**
+           * For areaStyle of stepped lines, `stackedOnPoints` should be
+           * filtered the same as `points` so that the base axis values
+           * should stay the same as the lines above. See #20021
+           */
+          var reference = basePoints || points;
+          if (!isNaN(reference[i]) && !isNaN(reference[i + 1])) {
             filteredPoints.push(points[i], points[i + 1]);
           }
         }
@@ -38238,9 +38372,9 @@
         this.group.add(symbolDraw.group);
         this._symbolDraw = symbolDraw;
         this._lineGroup = lineGroup;
+        this._changePolyState = bind(this._changePolyState, this);
       };
       LineView.prototype.render = function (seriesModel, ecModel, api) {
-        var _this = this;
         var coordSys = seriesModel.coordinateSystem;
         var group = this.group;
         var data = seriesModel.getData();
@@ -38305,11 +38439,11 @@
           });
           hasAnimation && this._initSymbolLabelAnimation(data, coordSys, clipShapeForSymbol);
           if (step) {
-            // TODO If stacked series is not step
-            points = turnPointsIntoStep(points, coordSys, step, connectNulls);
             if (stackedOnPoints) {
-              stackedOnPoints = turnPointsIntoStep(stackedOnPoints, coordSys, step, connectNulls);
+              stackedOnPoints = turnPointsIntoStep(stackedOnPoints, points, coordSys, step, connectNulls);
             }
+            // TODO If stacked series is not step
+            points = turnPointsIntoStep(points, null, coordSys, step, connectNulls);
           }
           polyline = this._newPolyline(points);
           if (isAreaChart) {
@@ -38365,11 +38499,11 @@
             } else {
               // Not do it in update with animation
               if (step) {
-                // TODO If stacked series is not step
-                points = turnPointsIntoStep(points, coordSys, step, connectNulls);
                 if (stackedOnPoints) {
-                  stackedOnPoints = turnPointsIntoStep(stackedOnPoints, coordSys, step, connectNulls);
+                  stackedOnPoints = turnPointsIntoStep(stackedOnPoints, points, coordSys, step, connectNulls);
                 }
+                // TODO If stacked series is not step
+                points = turnPointsIntoStep(points, null, coordSys, step, connectNulls);
               }
               polyline.setShape({
                 points: points
@@ -38430,9 +38564,7 @@
           getECData(polygon).seriesIndex = seriesModel.seriesIndex;
           toggleHoverEmphasis(polygon, focus, blurScope, emphasisDisabled);
         }
-        var changePolyState = function (toState) {
-          _this._changePolyState(toState);
-        };
+        var changePolyState = this._changePolyState;
         data.eachItemGraphicEl(function (el) {
           // Switch polyline / polygon state if element changed its state.
           el && (el.onHoverStateChange = changePolyState);
@@ -38771,10 +38903,10 @@
         var stackedOnNext = diff.stackedOnNext;
         if (step) {
           // TODO If stacked series is not step
-          current = turnPointsIntoStep(diff.current, coordSys, step, connectNulls);
-          stackedOnCurrent = turnPointsIntoStep(diff.stackedOnCurrent, coordSys, step, connectNulls);
-          next = turnPointsIntoStep(diff.next, coordSys, step, connectNulls);
-          stackedOnNext = turnPointsIntoStep(diff.stackedOnNext, coordSys, step, connectNulls);
+          stackedOnCurrent = turnPointsIntoStep(diff.stackedOnCurrent, diff.current, coordSys, step, connectNulls);
+          current = turnPointsIntoStep(diff.current, null, coordSys, step, connectNulls);
+          stackedOnNext = turnPointsIntoStep(diff.stackedOnNext, diff.next, coordSys, step, connectNulls);
+          next = turnPointsIntoStep(diff.next, null, coordSys, step, connectNulls);
         }
         // Don't apply animation if diff is large.
         // For better result and avoid memory explosion problems like
@@ -38967,19 +39099,6 @@
         // NaN will cause illegal axis extent.
         return isFinite(min) ? min : NaN;
       },
-      minmax: function (frame) {
-        var turningPointAbsoluteValue = -Infinity;
-        var turningPointOriginalValue = -Infinity;
-        for (var i = 0; i < frame.length; i++) {
-          var originalValue = frame[i];
-          var absoluteValue = Math.abs(originalValue);
-          if (absoluteValue > turningPointAbsoluteValue) {
-            turningPointAbsoluteValue = absoluteValue;
-            turningPointOriginalValue = originalValue;
-          }
-        }
-        return isFinite(turningPointOriginalValue) ? turningPointOriginalValue : NaN;
-      },
       // TODO
       // Median
       nearest: function (frame) {
@@ -39011,6 +39130,8 @@
             if (isFinite(rate) && rate > 1) {
               if (sampling === 'lttb') {
                 seriesModel.setData(data.lttbDownSample(data.mapDimension(valueAxis.dim), 1 / rate));
+              } else if (sampling === 'minmax') {
+                seriesModel.setData(data.minmaxDownSample(data.mapDimension(valueAxis.dim), 1 / rate));
               }
               var sampler = void 0;
               if (isString(sampling)) {
@@ -40224,6 +40345,8 @@
       el.barWidth = barWidth;
       group.add(el);
       el.useStyle(data.getVisual('style'));
+      // Stroke is rendered first to avoid overlapping with fill
+      el.style.stroke = null;
       // Enable tooltip and user mouse/touch event handlers.
       getECData(el).seriesIndex = seriesModel.seriesIndex;
       if (!seriesModel.get('silent')) {
@@ -40602,7 +40725,7 @@
           var rA = r + item.len;
           var rA2 = rA * rA;
           // Use ellipse implicit function to calculate x
-          var dx = Math.sqrt((1 - Math.abs(dy * dy / rB2)) * rA2);
+          var dx = Math.sqrt(Math.abs((1 - dy * dy / rB2) * rA2));
           var newX = cx + (dx + item.len2) * dir;
           var deltaX = newX - item.label.x;
           var newTargetWidth = item.targetTextWidth - deltaX * dir;
@@ -42062,6 +42185,8 @@
       },
       splitLine: {
         show: true,
+        showMinLine: true,
+        showMaxLine: true,
         lineStyle: {
           color: ['#E0E6F1'],
           width: 1,
@@ -43561,6 +43686,18 @@
           })
         });
         textEl.anid = 'label_' + tickValue;
+        setTooltipConfig({
+          el: textEl,
+          componentModel: axisModel,
+          itemName: formattedLabel,
+          formatterParamsExtra: {
+            isTruncated: function () {
+              return textEl.isTruncated;
+            },
+            value: rawLabel,
+            tickIndex: index
+          }
+        });
         // Pack data for mouse event
         if (triggerEvent) {
           var eventData = AxisBuilder.makeAxisEventDataBase(axisModel);
@@ -44050,6 +44187,8 @@
         var splitLineModel = axisModel.getModel('splitLine');
         var lineStyleModel = splitLineModel.getModel('lineStyle');
         var lineColors = lineStyleModel.get('color');
+        var showMinLine = splitLineModel.get('showMinLine') !== false;
+        var showMaxLine = splitLineModel.get('showMaxLine') !== false;
         lineColors = isArray(lineColors) ? lineColors : [lineColors];
         var gridRect = gridModel.coordinateSystem.getRect();
         var isHorizontal = axis.isHorizontal();
@@ -44062,6 +44201,10 @@
         var lineStyle = lineStyleModel.getLineStyle();
         for (var i = 0; i < ticksCoords.length; i++) {
           var tickCoord = axis.toGlobalCoord(ticksCoords[i].coord);
+          if (i === 0 && !showMinLine || i === ticksCoords.length - 1 && !showMaxLine) {
+            continue;
+          }
+          var tickValue = ticksCoords[i].tickValue;
           if (isHorizontal) {
             p1[0] = tickCoord;
             p1[1] = gridRect.y;
@@ -44074,9 +44217,8 @@
             p2[1] = tickCoord;
           }
           var colorIndex = lineCount++ % lineColors.length;
-          var tickValue = ticksCoords[i].tickValue;
           var line = new Line({
-            anid: tickValue != null ? 'line_' + ticksCoords[i].tickValue : null,
+            anid: tickValue != null ? 'line_' + tickValue : null,
             autoBatch: true,
             shape: {
               x1: p1[0],
@@ -50307,9 +50449,9 @@
       var color = textStyleModel.getTextColor();
       color && cssText.push('color:' + color);
       cssText.push('font:' + textStyleModel.getFont());
-      fontSize
       // @ts-ignore, leave it to the tooltip refactor.
-      && cssText.push('line-height:' + Math.round(fontSize * 3 / 2) + 'px');
+      var lineHeight = retrieve2(textStyleModel.get('lineHeight'), Math.round(fontSize * 3 / 2));
+      fontSize && cssText.push('line-height:' + lineHeight + 'px');
       var shadowColor = textStyleModel.get('textShadowColor');
       var shadowBlur = textStyleModel.get('textShadowBlur') || 0;
       var shadowOffsetX = textStyleModel.get('textShadowOffsetX') || 0;
@@ -50523,9 +50665,12 @@
       };
       TooltipHTMLContent.prototype.getSize = function () {
         var el = this.el;
-        return [el.offsetWidth, el.offsetHeight];
+        return el ? [el.offsetWidth, el.offsetHeight] : [0, 0];
       };
       TooltipHTMLContent.prototype.moveTo = function (zrX, zrY) {
+        if (!this.el) {
+          return;
+        }
         var styleCoord = this._styleCoord;
         makeStyleCoord(styleCoord, this._zr, this._container, zrX, zrY);
         if (styleCoord[0] != null && styleCoord[1] != null) {
@@ -53956,7 +54101,8 @@
             },
             onclick: function () {
               api.dispatchAction({
-                type: type === 'all' ? 'legendAllSelect' : 'legendInverseSelect'
+                type: type === 'all' ? 'legendAllSelect' : 'legendInverseSelect',
+                legendId: legendModel.id
               });
             }
           });
@@ -54300,46 +54446,60 @@
     }
 
     function legendSelectActionHandler(methodName, payload, ecModel) {
+      var isAllSelect = methodName === 'allSelect' || methodName === 'inverseSelect';
       var selectedMap = {};
-      var isToggleSelect = methodName === 'toggleSelected';
-      var isSelected;
-      // Update all legend components
+      var actionLegendIndices = [];
+      ecModel.eachComponent({
+        mainType: 'legend',
+        query: payload
+      }, function (legendModel) {
+        if (isAllSelect) {
+          legendModel[methodName]();
+        } else {
+          legendModel[methodName](payload.name);
+        }
+        makeSelectedMap(legendModel, selectedMap);
+        actionLegendIndices.push(legendModel.componentIndex);
+      });
+      var allSelectedMap = {};
+      // make selectedMap from all legend components
       ecModel.eachComponent('legend', function (legendModel) {
-        if (isToggleSelect && isSelected != null) {
+        each(selectedMap, function (isSelected, name) {
           // Force other legend has same selected status
           // Or the first is toggled to true and other are toggled to false
           // In the case one legend has some item unSelected in option. And if other legend
           // doesn't has the item, they will assume it is selected.
-          legendModel[isSelected ? 'select' : 'unSelect'](payload.name);
-        } else if (methodName === 'allSelect' || methodName === 'inverseSelect') {
-          legendModel[methodName]();
-        } else {
-          legendModel[methodName](payload.name);
-          isSelected = legendModel.isSelected(payload.name);
-        }
-        var legendData = legendModel.getData();
-        each(legendData, function (model) {
-          var name = model.get('name');
-          // Wrap element
-          if (name === '\n' || name === '') {
-            return;
-          }
-          var isItemSelected = legendModel.isSelected(name);
-          if (selectedMap.hasOwnProperty(name)) {
-            // Unselected if any legend is unselected
-            selectedMap[name] = selectedMap[name] && isItemSelected;
-          } else {
-            selectedMap[name] = isItemSelected;
-          }
+          legendModel[isSelected ? 'select' : 'unSelect'](name);
         });
+        makeSelectedMap(legendModel, allSelectedMap);
       });
       // Return the event explicitly
-      return methodName === 'allSelect' || methodName === 'inverseSelect' ? {
-        selected: selectedMap
+      return isAllSelect ? {
+        selected: allSelectedMap,
+        // return legendIndex array to tell the developers which legends are allSelect / inverseSelect
+        legendIndex: actionLegendIndices
       } : {
         name: payload.name,
-        selected: selectedMap
+        selected: allSelectedMap
       };
+    }
+    function makeSelectedMap(legendModel, out) {
+      var selectedMap = out || {};
+      each(legendModel.getData(), function (model) {
+        var name = model.get('name');
+        // Wrap element
+        if (name === '\n' || name === '') {
+          return;
+        }
+        var isItemSelected = legendModel.isSelected(name);
+        if (hasOwn(selectedMap, name)) {
+          // Unselected if any legend is unselected
+          selectedMap[name] = selectedMap[name] && isItemSelected;
+        } else {
+          selectedMap[name] = isItemSelected;
+        }
+      });
+      return selectedMap;
     }
     function installLegendAction(registers) {
       /**
@@ -55474,6 +55634,9 @@
           color: 'rgba(135,175,274,0.15)'
         },
         emphasis: {
+          handleLabel: {
+            show: true
+          },
           handleStyle: {
             borderColor: '#8FB0F7'
           },
@@ -55891,9 +56054,11 @@
           }
           sliderGroup.add(handles[handleIndex] = path);
           var textStyleModel = dataZoomModel.getModel('textStyle');
+          var handleLabel = dataZoomModel.get('handleLabel') || {};
+          var handleLabelShow = handleLabel.show || false;
           thisGroup.add(handleLabels[handleIndex] = new ZRText({
             silent: true,
-            invisible: true,
+            invisible: !handleLabelShow,
             style: createTextStyle(textStyleModel, {
               x: 0,
               y: 0,
@@ -56082,17 +56247,21 @@
         return isFunction(labelFormatter) ? labelFormatter(value, valueStr) : isString(labelFormatter) ? labelFormatter.replace('{value}', valueStr) : valueStr;
       };
       /**
-       * @param showOrHide true: show, false: hide
+       * @param isEmphasis true: show, false: hide
        */
-      SliderZoomView.prototype._showDataInfo = function (showOrHide) {
-        // Always show when drgging.
-        showOrHide = this._dragging || showOrHide;
+      SliderZoomView.prototype._showDataInfo = function (isEmphasis) {
+        var handleLabel = this.dataZoomModel.get('handleLabel') || {};
+        var normalShow = handleLabel.show || false;
+        var emphasisHandleLabel = this.dataZoomModel.getModel(['emphasis', 'handleLabel']);
+        var emphasisShow = emphasisHandleLabel.get('show') || false;
+        // Dragging is considered as emphasis, unless emphasisShow is false
+        var toShow = isEmphasis || this._dragging ? emphasisShow : normalShow;
         var displayables = this._displayables;
         var handleLabels = displayables.handleLabels;
-        handleLabels[0].attr('invisible', !showOrHide);
-        handleLabels[1].attr('invisible', !showOrHide);
+        handleLabels[0].attr('invisible', !toShow);
+        handleLabels[1].attr('invisible', !toShow);
         // Highlight move handle
-        displayables.moveHandle && this.api[showOrHide ? 'enterEmphasis' : 'leaveEmphasis'](displayables.moveHandle, 1);
+        displayables.moveHandle && this.api[toShow ? 'enterEmphasis' : 'leaveEmphasis'](displayables.moveHandle, 1);
       };
       SliderZoomView.prototype._onDragMove = function (handleIndex, dx, dy, event) {
         this._dragging = true;
@@ -56350,6 +56519,7 @@
         if (!labelModel.get('enabled')) {
           return;
         }
+        dom.setAttribute('role', 'img');
         if (labelModel.get('description')) {
           dom.setAttribute('aria-label', labelModel.get('description'));
           return;
@@ -56400,11 +56570,14 @@
               }
               var middleSeparator_1 = labelModel.get(['data', 'separator', 'middle']);
               var endSeparator_1 = labelModel.get(['data', 'separator', 'end']);
+              var excludeDimensionId_1 = labelModel.get(['data', 'excludeDimensionId']);
               var dataLabels = [];
               for (var i = 0; i < data.count(); i++) {
                 if (i < maxDataCnt) {
                   var name_1 = data.getName(i);
-                  var value = data.getValues(i);
+                  var value = !excludeDimensionId_1 ? data.getValues(i) : filter(data.getValues(i), function (v, j) {
+                    return indexOf(excludeDimensionId_1, j) === -1;
+                  });
                   var dataLabel = labelModel.get(['data', name_1 ? 'withName' : 'withoutName']);
                   dataLabels.push(replace(dataLabel, {
                     name: name_1,
