@@ -422,6 +422,10 @@ class TooltipHTMLContent {
     ) {
         const el = this.el;
 
+        if (!el) {
+          return;
+        }
+
         if (content == null) {
             el.innerHTML = '';
             return;

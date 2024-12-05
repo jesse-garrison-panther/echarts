@@ -74320,6 +74320,9 @@
       };
       TooltipHTMLContent.prototype.setContent = function (content, markers, tooltipModel, borderColor, arrowPosition) {
         var el = this.el;
+        if (!el) {
+          return;
+        }
         if (content == null) {
           el.innerHTML = '';
           return;
